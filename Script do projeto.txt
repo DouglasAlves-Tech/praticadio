@@ -1,0 +1,686 @@
+"""
+Agente de Higienização de Vendas da Porsche
+================================
+
+Lê um arquivo .xlsx de vendas Porsche (cru) e aplica as regras definidas em
+schema.md para gerar um novo arquivo tratado, com cada coluna sanitizada
+inserido logo após sua coluna de fonte.
+
+Uso:
+    python sanitize_porsche.py [INPUT_XLSX] [OUTPUT_XLSX]
+
+Sem dúvida, usamos os padrões definidos em INPUT_PATH e OUTPUT_PATH abaixo.
+"""
+
+from __future__ import annotations
+
+importar argparse
+importar datetime como dt
+importar re
+importar sys
+importar dados unicode
+from pathlib import Path
+from typing import Any
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+
+# ---------------------------------------------------------------------------
+# Valores padrão
+# ---------------------------------------------------------------------------
+INPUT_PATH = Path("porsche_database.xlsx")
+OUTPUT_PATH = Path("porsche_database_sanitized.xlsx")
+INVÁLIDO = "INVÁLIDO"
+
+
+# ---------------------------------------------------------------------------
+# Higienização de datas
+# ---------------------------------------------------------------------------
+MESES = {
+    "jan": 1, "janeiro": 1,
+    "fev": 2, "fevereiro": 2,
+    "março": 3, "março": 3,
+    "abr": 4, "abril": 4,
+    "maio": 5,
+    "jun": 6, "junho": 6,
+    "jul": 7, "julho": 7,
+    "agosto": 8, "agosto": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "outubro": 10, "outubro": 10,
+    "nov": 11, "novembro": 11,
+    "dez": 12, "dezembro": 12,
+}
+
+
+def _safe_date(y: int, m: int, d: int) -> str:
+    tentar:
+        retornar dt.date(y, m, d).strftime("%Y-%m-%d")
+    exceto (ValueError, TypeError):
+        retornar INVÁLIDO
+
+
+def sanitize_date(value: Any) -> str:
+    Se o valor for None ou for igual a "":
+        retornar INVÁLIDO
+
+    se isinstance(value, dt.datetime):
+        valor de retorno.strftime("%Y-%m-%d")
+    se isinstance(value, dt.date):
+        valor de retorno.strftime("%Y-%m-%d")
+
+    s = str(valor).strip()
+    se não s:
+        retornar INVÁLIDO
+
+    # AAAA-MM-DD / AAAA/MM/DD / AAAA.MM.DD
+    m = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$", s)
+    se m:
+        retornar _safe_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+    # MM/DD/AAAA ou MM-DD-AAAA
+    m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$", s)
+    se m:
+        retornar _safe_date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+
+    # MM/DD/AA ou MM-DD-AA
+    m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{2})$", s)
+    se m:
+        yy = int(m.group(3))
+        ano = 2000 + yy se yy < 70, caso contrário, 1900 + yy
+        retornar _safe_date(ano, int(m.group(1)), int(m.group(2)))
+
+    # Mês DD, AAAA / Seg DD, AAAA / Mês DD, AAAA
+    m = re.match(
+        r"^([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?[,\s]+(\d{4})$",
+        s,
+    )
+    se m:
+        mon_key = m.group(1).lower().rstrip(".")
+        se mon_key estiver em MESES:
+            retornar _safe_date(int(m.group(3)), MONTHS[mon_key], int(m.group(2)))
+
+    retornar INVÁLIDO
+
+
+# ---------------------------------------------------------------------------
+# Higienização do modelo Porsche
+# ---------------------------------------------------------------------------
+MODELOS_CANÔNICOS = [
+    "911 Carrera", "911 Carrera S", "911 Carrera GTS",
+    "911 Turbo", "911 Turbo S",
+    "911 GT3", "911 GT3 RS",
+    "911 Dakar",
+    "911 Targa 4", "911 Targa 4S",
+    "718 Cayman", "718 Cayman S", "718 Cayman GT4 RS",
+    "718 Boxster", "718 Boxster GTS",
+    "718 Spyder RS",
+    "Cayenne", "Cayenne S", "Cayenne Coupe", "Cayenne E-Hybrid",
+    "Cayenne Turbo", "Cayenne Turbo GT",
+    "Macan", "Macan S", "Macan T", "Macan GTS", "Macan Elétrico",
+    "Panamera", "Panamera 4", "Panamera 4S",
+    "Panamera Turbo", "Panamera Turbo S", "Panamera 4 E-Hybrid",
+    "Taycan", "Taycan 4S", "Taycan GTS",
+    "Taycan Turbo", "Taycan Turbo S", "Taycan Cross Turismo",
+]
+
+# Pesquisa sem distinção entre maiúsculas e minúsculas por chave normalizada
+_MODEL_LOOKUP = {m.lower(): m para m em CANONICAL_MODELS}
+
+
+def _smart_title(s: str) -> str:
+    """Title case preservando palavras comuns como E-Hybrid, GTS, RS, etc."""
+    manter_superior = {"GT", "GTS", "RS", "GT3", "GT4", "S", "T", "4", "4S", "USA"}
+    partes = s.split()
+    saída = []
+    para p em partes:
+        token = p.upper()
+        se o token estiver em keep_upper:
+            out.append(token)
+        elif "-" em p:
+            out.append("-".join(seg.capitalize() for seg in p.split("-")))
+        outro:
+            out.append(p.capitalize())
+    retornar " ".join(out)
+
+
+def sanitize_model(value: Any) -> str:
+    Se o valor for None:
+        retornar INVÁLIDO
+    s = " ".join(str(value).split()).strip()
+    se não s:
+        retornar INVÁLIDO
+    chave = s.minúsculas()
+    se a chave estiver em _MODEL_LOOKUP:
+        retornar _MODEL_LOOKUP[chave]
+    # Modelos desconhecidos ficam title-case
+    retornar _título_inteligente
+
+
+# ---------------------------------------------------------------------------
+# Higienização do ano modelo
+# ---------------------------------------------------------------------------
+PALAVRAS_PARA_NUM = {
+    "zero": 0, "um": 1, "dois": 2, "três": 3, "quatro": 4,
+    "cinco": 5, "seis": 6, "sete": 7, "oito": 8, "nove": 9,
+    "dez": 10, "onze": 11, "doze": 12, "treze": 13,
+    "quatorze": 14, "quinze": 15, "dezesseis": 16, "dezessete": 17,
+    "dezoito": 18, "dezenove": 19, "vinte": 20, "trinta": 30,
+    "quarenta": 40, "cinquenta": 50, "sessenta": 60, "setenta": 70,
+    "oitenta": 80, "noventa": 90,
+    "cem": 100, "mil": 1000,
+}
+
+
+def _words_to_int(text: str) -> int | None:
+    "Converter 'vinte e vinte e quatro', 'dois mil e vinte e dois', 'oitenta e dois mil', etc."
+    tokens = re.findall(r"[az]+", text.lower())
+    se não houver tokens:
+        retornar Nenhum
+    se algum(t não estiver em WORDS_TO_NUM para t em tokens):
+        retornar Nenhum
+
+    # Trata caso "vinte e vinte e quatro" (estilo ano: pares de bolsas)
+    # quando todos os tokens são <= 90 e nenhum é cem/mil
+    se todos(WORDS_TO_NUM[t] < 100 para t em tokens):
+        # tenta ler como dois pares: "vinte e vinte e quatro" -> 20*100 + 24
+        nums = [PALAVRAS_PARA_NUM[t] para t em tokens]
+        #combinar pares: ex [20, 20, 4] -> dois números: 20 e 24
+        grupos: lista[int] = []
+        i = 0
+        enquanto i < len(nums):
+            se i + 1 < len(nums) e nums[i] >= 20 e nums[i] % 10 == 0 e nums[i + 1] < 10:
+                grupos.append(nums[i] + nums[i + 1])
+                i += 2
+            outro:
+                grupos.append(nums[i])
+                i += 1
+        se len(grupos) == 2:
+            retornar grupos[0] * 100 + grupos[1]
+        se len(grupos) == 1:
+            retornar grupos[0]
+
+    # Estilo "dois mil e vinte e dois" / "oitenta e dois mil"
+    total = 0
+    atual = 0
+    para t em tokens:
+        v = PALAVRAS_PARA_NUM[t]
+        se v == 100:
+            atual = máx(1, atual) * 100
+        senão se v == 1000:
+            atual = máx(1, atual) * 1000
+            total += atual
+            atual = 0
+        outro:
+            corrente += v
+    retornar total + atual
+
+
+def sanitize_year(value: Any) -> str:
+    Se o valor for None:
+        retornar INVÁLIDO
+
+    Se isinstance(value, (int, float)) e não isinstance(value, bool):
+        y = int(valor)
+        retornar str(y) se 1990 <= y <= 2035 senão INVÁLIDO
+
+    s = str(valor).strip()
+    se não s:
+        retornar INVÁLIDO
+
+    # 4 dígitos
+    m = re.fullmatch(r"\d{4}", s)
+    se m:
+        y = int(s)
+        retornar str(y) se 1990 <= y <= 2035 senão INVÁLIDO
+
+    # Formatos como 20-23, 20 24, 20.24
+    m = re.fullmatch(r"(\d{2})\s*[-\s.]\s*(\d{2})", s)
+    se m:
+        y = int(m.group(1) + m.group(2))
+        retornar str(y) se 1990 <= y <= 2035 senão INVÁLIDO
+
+    # Texto "vinte vinte e quatro"
+    se re.search(r"[A-Za-z]", s):
+        n = _palavras_para_int(s)
+        se n não for None e 1990 <= n <= 2035:
+            retornar str(n)
+
+    retornar INVÁLIDO
+
+
+# ---------------------------------------------------------------------------
+# Higienização com preço de venda
+# ---------------------------------------------------------------------------
+MULTIPLICADORES_DE_PALAVRAS_DE_PREÇO = {
+    "mil": 1_000,
+    "milhão": 1.000.000
+}
+
+
+def _parse_textual_price(s: str) -> float | None:
+    "Analisa 'oitenta e dois mil', 'duzentos mil', etc."""
+    tokens = re.findall(r"[az]+", s.lower())
+    se não houver tokens:
+        retornar Nenhum
+    válido = conjunto(PALAVRAS_PARA_NUM) | {"milhão"}
+    se algum(t não for válido para t em tokens):
+        retornar Nenhum
+
+    total = 0
+    atual = 0
+    para t em tokens:
+        se t == "milhão":
+            atual = max(1, atual) * 1_000_000
+            total += atual
+            atual = 0
+        senão se t == "cem":
+            atual = máx(1, atual) * 100
+        senão se t == "mil":
+            atual = max(1, atual) * 1_000
+            total += atual
+            atual = 0
+        outro:
+            atual += PALAVRAS_PARA_NUM[t]
+    retornar float(total + atual)
+
+
+def _parse_numeric_price(num_str: str) -> float | None:
+    """Lida com formatos US e europeus."""
+    s = num_str.strip()
+    se não s:
+        retornar Nenhum
+
+    tem_ponto = "." em s
+    tem_vírgula = "," em s
+
+    se tiver_ponto e tiver_vírgula:
+        # O último separador vence como decimal
+        se s.rfind(",") > s.rfind("."):
+            #europeu: . é milhar, , é decimal
+            s = s.replace(".", "").replace(",", ".")
+        outro:
+            #EUA: , é milhar, . é decimal
+            s = s.replace(",", "")
+    elif has_comma:
+        # Apenas vérgula. Se houver mais de uma OU os dígitos pós-vírgula não foram 2,
+        # tratamos como milhar.
+        último = s.rsplit(",", 1)
+        dígitos_após = re.sub(r"\D", "", último[1])
+        se s.count(",") > 1 ou len(digits_after) != 2:
+            s = s.replace(",", "")
+        outro:
+            s = s.replace(",", ".")
+    senão se tem_ponto:
+        # Apenas ponto. Se múltiplos pontos OU dígitos após o último não foram 2,
+        # tratamos como milhar (estilo europeu).
+        último = s.rsplit(".", 1)
+        dígitos_após = re.sub(r"\D", "", último[1])
+        se s.count(".") > 1 ou len(digits_after) != 2:
+            s = s.replace(".", "")
+
+    tentar:
+        retornar float(s)
+    exceto ValueError:
+        retornar Nenhum
+
+
+def sanitize_price(value: Any) -> str:
+    Se o valor for None ou for igual a "":
+        retornar INVÁLIDO
+
+    Se isinstance(value, (int, float)) e não isinstance(value, bool):
+        retornar f"{float(valor):.2f}"
+
+    s = str(valor).strip()
+    se não s:
+        retornar INVÁLIDO
+
+    # Remover símbolos comuns e palavras-chave (USD, dólares)
+    limpo = s.replace("$", " ")
+    limpo = re.sub(r"\b(usd|dólares?)\b", " ", limpo, flags=re.IGNORECASE)
+    limpo = limpo.removido()
+
+    #Preço textual: contem apenas letras e espaços
+    se re.fullmatch(r"[A-Za-z\s]+", limpo):
+        n = _parse_textual_price(limpo)
+        retornar f"{n:.2f}" se n não for None, caso contrário, INVÁLIDO
+
+    # Multiplicador "k" (mil)
+    multiplicador = 1,0
+    m = re.search(r"([0-9.,]+)\s*k\b", cleaned, flags=re.IGNORECASE)
+    se m:
+        num_part = m.group(1)
+        multiplicador = 1000,0
+    outro:
+        # Pega o token numérico
+        m = re.search(r"[0-9.,]+", limpo)
+        se não m:
+            retornar INVÁLIDO
+        num_part = m.group(0)
+
+    n = _parse_numeric_price(num_part)
+    se n for None:
+        retornar INVÁLIDO
+    retornar f"{n * multiplicador:.2f}"
+
+
+# ---------------------------------------------------------------------------
+# Higienização da quilometragem do veículo
+# ---------------------------------------------------------------------------
+def sanitize_mileage(value: Any) -> str:
+    Se o valor for None:
+        retornar INVÁLIDO
+
+    Se isinstance(value, (int, float)) e não isinstance(value, bool):
+        # Pode vir como float (ex.: 9.5). Tratamos como inteiro de milhas.
+        retornar str(int(round(float(valor))))
+
+    s = str(valor).strip()
+    se não s:
+        retornar INVÁLIDO
+
+    baixo = s.lower()
+    se baixo em {"novo", "carro novo", "zero milhas", "zero", "0 mi", "0 milhas", "0mi"}:
+        retornar "0"
+
+    # KM (conversor preciso)
+    is_km = bool(re.search(r"\bkm\b", low) or low.startswith("km"))
+
+    # Texto puro (sem dígitos): "doze mil milhas", "quinze mil milhas"
+    dígitos_presentes = bool(re.search(r"\d", s))
+    se não houver dígitos presentes:
+        # Removedores
+        textual = re.sub(r"\b(mi|miles|mile|km|kilometers|kilometres)\b", " ", low)
+        textual = textual.strip()
+        n = _parse_textual_price(textual) # mesma lógica de palavras
+        se n for None:
+            retornar INVÁLIDO
+        milhas = n * (0,621371 se é_km senão 1,0)
+        retornar str(int(round(miles)))
+
+    # Capturar parte numérica
+    m = re.search(r"[0-9][0-9.,]*", s)
+    se não m:
+        retornar INVÁLIDO
+    num_part = m.group(0)
+    n = _parse_numeric_price(num_part)
+    se n for None:
+        retornar INVÁLIDO
+    se is_km:
+        n = n * 0,621371
+    retornar str(int(round(n)))
+
+
+# ---------------------------------------------------------------------------
+# Higienização do método de pagamento
+# ---------------------------------------------------------------------------
+PAGAMENTO_CANÔNICO = [
+    "Cartão de crédito", "Cartão de débito", "Transferência bancária", "Transferência eletrônica",
+    "Financiamento", "Leasing", "Dinheiro", "Pagamento ACH", "Pagamento em Criptomoedas"
+]
+
+
+def _normalize_text_key(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c para c em s se não unicodedata.combining(c))
+    s = re.sub(r"[\W_]+", " ", s.lower()).strip()
+    s = re.sub(r"\s+", " ", s)
+    retornar s
+
+
+PAGAMENTO_CONSULTA = {
+    # Cartão de crédito
+    "cartão de crédito": "Cartão de Crédito",
+    "cartão de crédito": "Cartão de Crédito",
+    "crédito": "Cartão de Crédito",
+    "pagamento com cartão de crédito": "Cartão de Crédito",
+    # Cartão de Débito
+    "cartão de débito": "Cartão de Débito",
+    "cartão de débito": "Cartão de Débito",
+    # Transferência Bancária
+    "transferência bancária": "Transferência Bancária",
+    "transferência bancária": "Transferência Bancária",
+    "banco": "Transferência bancária",
+    # Transferência bancária
+    "transferência bancária": "Transferência Bancária",
+    "transferência eletrônica": "Transferência bancária",
+    "wire": "Transferência bancária",
+    "Transferência bancária": "Transferência eletrônica"
+    "wire bank": "Transferência bancária",
+    # Financiamento
+    "financiamento": "Financiamento",
+    "finanças": "Financiamento",
+    "plano de financiamento": "Financiamento",
+    # Alugar
+    "aluguel": "Aluguel",
+    "leasing": "Locação",
+    "plano de arrendamento": "Arrendamento",
+    # Dinheiro
+    "dinheiro": "Dinheiro",
+    "pagamento em dinheiro": "Dinheiro",
+    # ACH
+    "ach": "Pagamento ACH",
+    "pagamento ach": "Pagamento ACH",
+    # Criptomoedas
+    "cripto": "Pagamento em Criptomoedas",
+    "pagamento em criptomoedas": "Pagamento em criptomoedas",
+    "criptomoeda": "Pagamento em Criptomoeda",
+}
+
+
+def sanitize_payment(value: Any) -> str:
+    Se o valor for None:
+        retornar INVÁLIDO
+    s = str(valor).strip()
+    se não s:
+        retornar INVÁLIDO
+    chave = _normalizar_chave_de_texto(s)
+    se a chave estiver em PAYMENT_LOOKUP:
+        retornar PAYMENT_LOOKUP[chave]
+    # Desconhecidos: título em caixa alta
+    retornar " ".join(w.capitalize() para w em key.split())
+
+
+# ---------------------------------------------------------------------------
+# Higienização da cidade
+# ---------------------------------------------------------------------------
+def sanitize_city(value: Any) -> str:
+    Se o valor for None:
+        retornar INVÁLIDO
+    s = " ".join(str(value).split()).strip()
+    se não s:
+        retornar INVÁLIDO
+
+    partes = s.split(" ")
+    saída: lista[str] = []
+    para p em partes:
+        se p.lower() == "st." ou p.lower() == "st":
+            out.append("St.")
+        elif p.lower() == "mt." or p.lower() == "mt":
+            out.append("Monte")
+        elif "-" em p:
+            out.append("-".join(seg.capitalize() for seg in p.split("-")))
+        outro:
+            out.append(p.capitalize())
+    retornar " ".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Saneamento estatal
+# ---------------------------------------------------------------------------
+EUA_ESTADOS = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "Califórnia": "CA", "Colorado": "CO", "Connecticut": "CT", "Delaware": "DE",
+    "Flórida": "FL", "Geórgia": "GA", "Havaí": "HI", "Idaho": "ID",
+    "Illinois": "IL", "Indiana": "IN", "Iowa": "IA", "Kansas": "KS",
+    "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME", "Maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN",
+    "mississippi": "MS", "missouri": "MO", "montana": "MT", "nebraska": "NE",
+    "Nevada": "NV", "Nova Hampshire": "NH", "Nova Jersey": "NJ",
+    "Novo México": "NM", "Nova York": "NY", "Carolina do Norte": "NC",
+    "Dakota do Norte": "ND", "Ohio": "OH", "Oklahoma": "OK", "Oregon": "OR",
+    "Pensilvânia": "PA", "Rhode Island": "RI", "Carolina do Sul": "SC",
+    "Dakota do Sul": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT",
+    "Vermont": "VT", "Virginia": "VA", "Washington": "WA",
+    "Virgínia Ocidental": "WV", "Wisconsin": "WI", "Wyoming": "WY",
+    "Distrito de Columbia": "DC",
+}
+US_STATE_CODES = set(US_STATES.values())
+
+
+def sanitize_state(value: Any) -> str:
+    Se o valor for None:
+        retornar INVÁLIDO
+    s = str(valor).strip()
+    se não s:
+        retornar INVÁLIDO
+    superior = s.superior().strip()
+    se estiver em maiúsculas em US_STATE_CODES:
+        retornar superior
+    chave = " ".join(s.lower().split())
+    se a chave estiver em US_STATES:
+        retornar US_STATES[chave]
+    retornar INVÁLIDO
+
+
+# ---------------------------------------------------------------------------
+# Higienização do status de entrega
+# ---------------------------------------------------------------------------
+DELIVERY_LOOKUP = {
+    "entregue": "Entregue",
+    "deliverd": "Entregue", # erro de digitação comum
+    "pendente": "Pendente",
+    "em trânsito": "Em Trânsito",
+    "em trânsito": "Em trânsito",
+    "cancelado": "Cancelado",
+    "cancelado": "Cancelado",
+    "aguardando entrega": "Aguardando Entrega",
+    "Aguardando coleta": "Aguardando coleta",
+    "Aguardando aprovação": "Aguardando aprovação",
+    "Aguardando revisão": "Aguardando revisão",
+    "enviado": "Enviado",
+    "Aguardando revisão": "Aguardando revisão",
+}
+
+
+def sanitize_delivery(value: Any) -> str:
+    Se o valor for None:
+        retornar INVÁLIDO
+    s = str(valor).strip()
+    se não s:
+        retornar INVÁLIDO
+    chave = _normalizar_chave_de_texto(s)
+    se a chave estiver em DELIVERY_LOOKUP:
+        retornar DELIVERY_LOOKUP[chave]
+    retornar " ".join(w.capitalize() para w em key.split()) ou INVÁLIDO
+
+
+# ---------------------------------------------------------------------------
+# Oleoduto
+# ---------------------------------------------------------------------------
+COLUNA_PIPELINE = [
+    # (col_de_entrada, nome_col_sanitizado ou None, sanitizador ou None)
+    ("sale_id", None, None),
+    ("data_venda", "Data_vendaSanitizada", sanitize_date),
+    ("nome_do_cliente", Nenhum, Nenhum),
+    ("porsche_model", "PorscheModelSanitized", sanitize_model),
+    ("model_year", "ModelYearSanitized", sanitize_year),
+    ("preço_de_venda", "Preço_de_venda_higienizado", preço_higienizado),
+    ("vehicle_mileage", "VehicleMileageSanitized", sanitize_mileage),
+    ("método_de_pagamento", "Método_de_pagamentoSanitizado", sanitizar_pagamento),
+    ("cidade", "CidadeSanitizada", sanitizar_cidade),
+    ("estado", "EstadoSanitizado", sanitizar_estado),
+    ("vendedor", Nenhum, Nenhum),
+    ("status_de_entrega", "Status_de_entrega_sanitizado", sanitizar_entrega),
+]
+
+
+def process_workbook(input_path: Path, output_path: Path) -> dict[str, int]:
+    wb_in = carregar_livro_de_trabalho(caminho_de_entrada, somente_dados=True)
+    ws_in = wb_in.ativo
+
+    linhas = lista(ws_in.iter_linhas(valores_apenas=True))
+    se não houver linhas:
+        raise ValueError("Pasta de trabalho vazia")
+
+    cabeçalho = [str(h).strip() se h não for None senão "" para h em linhas[0]]
+    nome_para_idx = {h: i para i, h em enumerate(cabeçalho)}
+
+    # Validar apresentação das colunas requeridas
+    ausente = [c para c, _, _ em COLUMN_PIPELINE se c não estiver em name_to_idx]
+    se estiver faltando:
+        raise ValueError(f"Colunas obrigatórias ausentes na entrada: {missing}")
+
+    wb_out = Workbook()
+    ws_out = wb_out.ativo
+    ws_out.title = "Sanitizado"
+
+    # Cabeçalho final
+    cabeçalho_saída: lista[str] = []
+    para src, san_name, _ em COLUMN_PIPELINE:
+        out_header.append(src)
+        se san_name:
+            out_header.append(san_name)
+    ws_out.append(out_header)
+
+    # Estilo do cabeçalho
+    fonte_do_cabeçalho = Font(negrito=True, cor="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="1F2937")
+    sanitized_fill = PatternFill("solid", fgColor="065F46")
+    para col_idx, nome em enumerate(out_header, start=1):
+        célula = ws_out.cell(linha=1, coluna=col_idx)
+        cell.font = fonte_do_cabeçalho
+        cell.fill = sanitized_fill se name.endswith("Sanitized") senão header_fill
+
+    # Estatísticas de inválidos
+    invalid_counts: dict[str, int] = {}
+
+    para r em linhas[1:]:
+        out_row: list[Any] = []
+        para src, san_name, fn em COLUMN_PIPELINE:
+            raw = r[nome_para_idx[src]]
+            out_row.append(raw)
+            Se san_name e fn não forem None:
+                limpar = fn(bruto)
+                se limpo == INVÁLIDO:
+                    invalid_counts[san_name] = invalid_counts.get(san_name, 0) + 1
+                out_row.append(limpo)
+        ws_out.append(out_row)
+
+    # Largura das colunas
+    para col_idx em range(1, len(out_header) + 1):
+        letra = obter_letra_da_coluna(idx_coluna)
+        ws_out.column_dimensions[letter].width = max(14, len(out_header[col_idx - 1]) + 2)
+    ws_out.freeze_panes = "A2"
+
+    wb_out.save(caminho_de_saída)
+    retornar contagens_inválidas
+
+
+def main(argv: list[str] | None = None) -> int:
+    analisador = argparse.ArgumentParser(descrição=__doc__)
+    parser.add_argument("input", nargs="?", default=str(INPUT_PATH))
+    parser.add_argument("output", nargs="?", default=str(OUTPUT_PATH))
+    args = parser.parse_args(argv)
+
+    caminho_de_entrada = Caminho(args.entrada)
+    caminho_saída = Path(args.saída)
+    se não existir em_path.exists():
+        print(f"ERRO: arquivo de entrada não encontrado: {in_path}", file=sys.stderr)
+        retornar 1
+
+    estatísticas = processar_livro_de_trabalho(caminho_de_entrada, caminho_de_saída)
+    print(f"OK -> {out_path}")
+    se estatísticas:
+        print("Contagens INVÁLIDAS por coluna higienizada:")
+        para k, v em sorted(stats.items()):
+            print(f" {k}: {v}")
+    outro:
+        print("Nenhum valor inválido foi produzido.")
+    retornar 0
+
+
+se __name__ == "__main__":
+    sys.exit(main())
